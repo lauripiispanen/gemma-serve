@@ -8,8 +8,8 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 add_subdirectory(llama)
 
 # Your target
-add_executable(inference_test src/inference.cpp)
-add_executable(batch_inference_test src/batch_inference.cpp)
+add_executable(inference_test src/inference.cpp src/common.cpp)
+add_executable(batch_inference_test src/batch_inference.cpp src/common.cpp)
 
 # Link with llama static library
 target_include_directories(inference_test PRIVATE llama)
