@@ -5,60 +5,37 @@
 #include <memory>
 #include <chrono>
 #include <numeric>
+#include <queue>
 #include "llama.h"
 #include "common.h"
 
 constexpr int BATCH_MAX_TOKENS_OUT = 512;
-
-PromptStats process_prompt(
-    std::unique_ptr<llama_context, decltype(&llama_free)> &ctx,
-    const llama_model *model,
-    const std::string &prompt,
-    std::ofstream &output_file,
-    int prompt_id)
-{
-  PromptStats stats;
-  stats.prompt_id = prompt_id;
-
-  std::vector<llama_token> tokens;
-  int n_tokens = 0;
-
-  stats.t_tokenize_done = std::chrono::high_resolution_clock::now();
-
-  if (process_prompt(ctx.get(), model, prompt, tokens, n_tokens) != 0)
-  {
-    return stats;
-  }
-
-  stats.input_tokens = n_tokens;
-
-  std::string output = generate_text(
-      ctx.get(),
-      model,
-      tokens,
-      n_tokens,
-      stats,
-      BATCH_MAX_TOKENS_OUT);
-
-  // Write prompt and output to file
-  output_file << "Prompt " << prompt_id << ":\n";
-  output_file << "Input: " << prompt << "\n";
-  output_file << "Output: " << output << "\n\n";
-
-  return stats;
-}
+constexpr int DEFAULT_BATCH_SIZE = 4;
 
 int main(int argc, char **argv)
 {
+  int batch_size = DEFAULT_BATCH_SIZE;
+
   if (argc < 4)
   {
-    std::cerr << "Usage: " << argv[0] << " <path_to_model> <prompts_file> <output_file>" << std::endl;
+    std::cerr << "Usage: " << argv[0] << " <path_to_model> <prompts_file> <output_file> [batch_size]" << std::endl;
+    std::cerr << "  batch_size: Number of prompts to process in parallel (default: " << DEFAULT_BATCH_SIZE << ")" << std::endl;
     return 1;
   }
 
   const char *model_path = argv[1];
   const char *prompts_file_path = argv[2];
   const char *output_file_path = argv[3];
+
+  if (argc > 4)
+  {
+    batch_size = std::stoi(argv[4]);
+    if (batch_size <= 0)
+    {
+      std::cerr << "Invalid batch size. Using default: " << DEFAULT_BATCH_SIZE << std::endl;
+      batch_size = DEFAULT_BATCH_SIZE;
+    }
+  }
 
   std::ifstream prompts_file(prompts_file_path);
   if (!prompts_file.is_open())
@@ -90,27 +67,57 @@ int main(int argc, char **argv)
     return 1;
   }
 
-  std::cout << "Starting batch inference..." << std::endl;
+  std::cout << "Starting batch inference with " << batch_size << " prompts per batch..." << std::endl;
 
   BatchStats batch_stats;
   batch_stats.batch_start = std::chrono::high_resolution_clock::now();
 
   std::string prompt;
-  int prompt_id = 0;
+  std::vector<std::string> prompt_batch;
+  std::vector<int> prompt_ids;
+  int next_prompt_id = 1;
 
+  std::queue<std::pair<int, std::string>> all_prompts;
   while (std::getline(prompts_file, prompt))
   {
-    if (prompt.empty())
+    if (!prompt.empty())
     {
-      continue;
+      all_prompts.push({next_prompt_id++, prompt});
+    }
+  }
+
+  while (!all_prompts.empty())
+  {
+    prompt_batch.clear();
+    prompt_ids.clear();
+
+    int batch_prompt_count = std::min(batch_size, static_cast<int>(all_prompts.size()));
+    for (int i = 0; i < batch_prompt_count; i++)
+    {
+      auto [id, text] = all_prompts.front();
+      all_prompts.pop();
+      prompt_batch.push_back(text);
+      prompt_ids.push_back(id);
     }
 
-    prompt_id++;
-    std::cout << "Processing prompt " << prompt_id << "..." << std::endl;
+    std::cout << "Processing batch of " << batch_prompt_count << " prompts..." << std::endl;
 
-    PromptStats prompt_stats = process_prompt(ctx, model.get(), prompt, output_file, prompt_id);
-    prompt_stats.print_batch();
-    batch_stats.add_prompt_stats(prompt_stats);
+    auto batch_result = process_batch(ctx.get(), model.get(), prompt_batch, BATCH_MAX_TOKENS_OUT);
+
+    for (size_t i = 0; i < batch_result.outputs.size(); i++)
+    {
+      int prompt_id = prompt_ids[i];
+      std::string output = batch_result.outputs[i];
+      PromptStats stats = batch_result.stats[i];
+      stats.prompt_id = prompt_id;
+
+      output_file << "Prompt " << prompt_id << ":\n";
+      output_file << "Input: " << prompt_batch[i] << "\n";
+      output_file << "Output: " << output << "\n\n";
+
+      stats.print_batch();
+      batch_stats.add_prompt_stats(stats);
+    }
   }
 
   batch_stats.batch_end = std::chrono::high_resolution_clock::now();

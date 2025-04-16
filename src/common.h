@@ -1,17 +1,5 @@
 #pragma once
 
-/**
- * @file common.h
- * @brief Common functionality shared between inference and batch_inference
- *
- * This file contains shared code that was previously duplicated between
- * inference.cpp and batch_inference.cpp, including:
- * - Stats tracking structures
- * - RAII wrappers for LLAMA API resources
- * - Model loading and initialization
- * - Text generation pipeline
- */
-
 #include <iostream>
 #include <string>
 #include <vector>
@@ -188,37 +176,25 @@ std::unique_ptr<llama_context, decltype(&llama_free)> create_context(llama_model
 std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)> create_sampler();
 
 /**
- * Process input text through tokenization and prefill
- *
- * @param ctx LLAMA context
- * @param model LLAMA model
- * @param prompt Input text to process
- * @param tokens Output vector to store tokenized input
- * @param n_tokens Output parameter for number of tokens
- * @return 0 on success, non-zero on error
+ * Result structure for batch processing
  */
-int process_prompt(
-    llama_context *ctx,
-    const llama_model *model,
-    const std::string &prompt,
-    std::vector<llama_token> &tokens,
-    int &n_tokens);
+struct BatchProcessingResult
+{
+  std::vector<std::string> outputs;
+  std::vector<PromptStats> stats;
+};
 
 /**
- * Generate text from a model with option for max tokens
+ * Process multiple prompts in a single batch
  *
  * @param ctx LLAMA context
  * @param model LLAMA model
- * @param tokens Input tokens from tokenization
- * @param n_tokens Number of input tokens
- * @param stats Stats object for tracking
- * @param max_tokens Maximum number of tokens to generate
- * @return Generated text
+ * @param prompts Vector of input texts to process
+ * @param max_tokens_out Maximum number of tokens to generate per prompt
+ * @return BatchProcessingResult containing outputs and stats for each prompt
  */
-std::string generate_text(
+BatchProcessingResult process_batch(
     llama_context *ctx,
     const llama_model *model,
-    const std::vector<llama_token> &tokens,
-    int n_tokens,
-    PromptStats &stats,
-    int max_tokens = MAX_TOKENS_OUT_DEFAULT);
+    const std::vector<std::string> &prompts,
+    int max_tokens_out);

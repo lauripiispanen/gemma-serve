@@ -110,141 +110,270 @@ std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)> create_sampler()
   return sampler;
 }
 
-int process_prompt(
+BatchProcessingResult process_batch(
     llama_context *ctx,
     const llama_model *model,
-    const std::string &prompt,
-    std::vector<llama_token> &tokens,
-    int &n_tokens)
+    const std::vector<std::string> &prompts,
+    int max_tokens_out)
 {
+  const auto batch_start = std::chrono::high_resolution_clock::now();
+  BatchProcessingResult result;
+  result.outputs.resize(prompts.size());
+  result.stats.resize(prompts.size());
+
+  for (size_t i = 0; i < prompts.size(); i++)
+  {
+    result.stats[i].prompt_id = i;
+    result.stats[i].t_start = batch_start;
+  }
+
+  // Step 1: Tokenize all prompts
+  std::vector<std::vector<llama_token>> all_tokens(prompts.size());
+  std::vector<int> n_tokens(prompts.size());
+
+  for (size_t i = 0; i < prompts.size(); i++)
+  {
+    all_tokens[i].resize(prompts[i].size() + TOKEN_BUFFER_PADDING);
+
+    n_tokens[i] = llama_tokenize(
+        llama_model_get_vocab(model),
+        prompts[i].c_str(),
+        static_cast<int>(prompts[i].size()),
+        all_tokens[i].data(),
+        static_cast<int>(all_tokens[i].size()),
+        true, // Add BOS/EOS if model needs it
+        true  // Parse special tokens
+    );
+
+    if (n_tokens[i] < 0)
+    {
+      std::cerr << "Tokenization failed for prompt " << i << std::endl;
+      continue;
+    }
+
+    all_tokens[i].resize(n_tokens[i]);
+    result.stats[i].input_tokens = n_tokens[i];
+    result.stats[i].t_tokenize_done = std::chrono::high_resolution_clock::now();
+  }
+
+  // Step 2: Create and process initial batch with all prompts
   llama_kv_self_clear(ctx);
 
-  const llama_vocab *vocab = llama_model_get_vocab(model);
-
-  if (tokens.size() < prompt.size() + TOKEN_BUFFER_PADDING)
+  // Count total tokens across all prompts
+  int total_tokens = 0;
+  for (int n : n_tokens)
   {
-    tokens.resize(prompt.size() + TOKEN_BUFFER_PADDING);
+    if (n > 0)
+      total_tokens += n;
   }
 
-  n_tokens = llama_tokenize(
-      vocab,
-      prompt.c_str(),
-      static_cast<int>(prompt.size()),
-      tokens.data(),
-      static_cast<int>(tokens.size()),
-      true, // Add BOS/EOS if model needs it
-      true  // Parse special tokens
-  );
-
-  if (n_tokens < 0)
+  if (total_tokens == 0)
   {
-    std::cerr << "Tokenization failed" << std::endl;
-    return 1;
+    return result;
   }
 
-  tokens.resize(n_tokens);
+  // Create batch for all prompts
+  llama_batch batch = llama_batch_init(total_tokens, 0, prompts.size());
 
-  llama_batch batch = llama_batch_init(n_tokens, 0, 1);
-  if (!batch.token || !batch.logits || !batch.n_seq_id || !batch.seq_id)
+  // Fill the batch with tokens from all prompts
+  int token_idx = 0;
+  for (size_t i = 0; i < prompts.size(); i++)
   {
-    std::cerr << "Failed to initialize batch" << std::endl;
-    return 1;
+    if (n_tokens[i] <= 0)
+      continue;
+
+    for (int j = 0; j < n_tokens[i]; j++)
+    {
+      batch.token[token_idx] = all_tokens[i][j];
+      batch.pos[token_idx] = j; // Set position information
+      batch.n_seq_id[token_idx] = 1;
+      batch.seq_id[token_idx][0] = i; // Use prompt index as sequence ID
+
+      // Only compute logits for the last token of each prompt
+      batch.logits[token_idx] = (j == n_tokens[i] - 1) ? 1 : 0;
+
+      token_idx++;
+    }
   }
 
-  batch.n_tokens = n_tokens;
+  batch.n_tokens = token_idx;
 
-  for (int i = 0; i < n_tokens; i++)
+  // Process the batch
+  if (llama_decode(ctx, batch) != 0)
   {
-    batch.token[i] = tokens[i];
+    std::cerr << "Failed to decode initial batch" << std::endl;
+    llama_batch_free(batch);
+    return result;
   }
 
-  batch.pos = nullptr;
-
-  for (int i = 0; i < n_tokens; i++)
-  {
-    batch.logits[i] = (i == n_tokens - 1) ? 1 : 0;
-  }
-
-  for (int i = 0; i < n_tokens; i++)
-  {
-    batch.n_seq_id[i] = 1;
-    batch.seq_id[i][0] = 0;
-  }
-
-  const int prefill_result = llama_decode(ctx, batch);
   llama_batch_free(batch);
 
-  if (prefill_result != 0)
+  // Step 3: Generation phase - create samplers for each sequence
+  std::vector<std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)>> samplers;
+  std::vector<bool> completed(prompts.size(), false);
+  std::vector<bool> first_token(prompts.size(), true);
+  std::vector<int> token_counts(prompts.size(), 0);
+
+  // Initialize samplers for each sequence
+  for (size_t i = 0; i < prompts.size(); i++)
   {
-    std::cerr << "Failed to evaluate prompt, error code: " << prefill_result << std::endl;
-    return 1;
+    if (n_tokens[i] <= 0)
+    {
+      completed[i] = true;
+      continue;
+    }
+
+    auto sampler = create_sampler();
+    samplers.push_back(std::move(sampler));
+    result.stats[i].t_prefill_done = std::chrono::high_resolution_clock::now();
   }
 
-  return 0;
-}
-
-std::string generate_text(
-    llama_context *ctx,
-    const llama_model *model,
-    const std::vector<llama_token> &tokens,
-    int n_tokens,
-    PromptStats &stats,
-    int max_tokens)
-{
-  const llama_vocab *vocab = llama_model_get_vocab(model);
-  std::string output;
-
-  auto sampler = create_sampler();
-
-  bool first_token = true;
-  auto t_prefill_done = std::chrono::high_resolution_clock::now();
-  stats.t_prefill_done = t_prefill_done;
-
-  for (int i = 0; i < max_tokens; ++i)
+  // Generation loop
+  for (int gen_idx = 0; gen_idx < max_tokens_out; gen_idx++)
   {
-    const llama_token token = llama_sampler_sample(sampler.get(), ctx, -1);
-
-    if (first_token)
+    // Check if all sequences are completed
+    bool all_completed = true;
+    for (size_t i = 0; i < prompts.size(); i++)
     {
-      stats.t_first_token = std::chrono::high_resolution_clock::now();
-      first_token = false;
+      if (!completed[i])
+      {
+        all_completed = false;
+        break;
+      }
     }
 
-    char buffer[128];
-    const int len = llama_token_to_piece(vocab, token, buffer, sizeof(buffer), 0, false);
-    if (len < 0)
+    if (all_completed)
+      break;
+
+    // Count active sequences first to know how many tokens we need
+    int active_sequences = 0;
+    for (size_t i = 0; i < prompts.size(); i++)
+    {
+      if (!completed[i])
+      {
+        active_sequences++;
+      }
+    }
+
+    if (active_sequences == 0)
     {
       break;
     }
 
-    std::string token_text(buffer, len);
-    output += token_text;
-    stats.output_tokens++;
-
-    ScopedBatch next_batch(token, static_cast<llama_pos>(tokens.size() + i));
-    if (!next_batch.is_valid())
+    // Initialize batch with the exact size we need
+    llama_batch next_batch = llama_batch_init(active_sequences, 0, prompts.size());
+    if (!next_batch.token || !next_batch.pos || !next_batch.n_seq_id || !next_batch.seq_id || !next_batch.logits)
     {
-      std::cerr << "Failed to create batch for next token" << std::endl;
+      std::cerr << "Failed to initialize generation batch" << std::endl;
       break;
     }
+    next_batch.n_tokens = 0;
 
-    const int decode_result = llama_decode(ctx, *next_batch.get());
-    if (decode_result != 0)
+    // First, get the logits for each sequence
+    std::vector<llama_token> next_tokens(prompts.size());
+    std::vector<bool> token_generated(prompts.size(), false);
+    for (size_t i = 0; i < prompts.size(); i++)
     {
-      std::cerr << "Failed to evaluate next token, error code: " << decode_result << std::endl;
-      break;
+      if (completed[i])
+        continue;
+
+      // Safety check - ensure we have valid samplers
+      if (i >= samplers.size() || !samplers[i])
+      {
+        std::cerr << "Warning: Invalid sampler for sequence " << i << std::endl;
+        completed[i] = true;
+        continue;
+      }
+
+      try
+      {
+        const llama_token token = llama_sampler_sample(samplers[i].get(), ctx, -1);
+        next_tokens[i] = token;
+        token_generated[i] = true;
+      }
+      catch (...)
+      {
+        std::cerr << "Error sampling token for sequence " << i << std::endl;
+        completed[i] = true;
+        continue;
+      }
+
+      if (first_token[i])
+      {
+        result.stats[i].t_first_token = std::chrono::high_resolution_clock::now();
+        first_token[i] = false;
+      }
+
+      // Convert token to text and append to output
+      char buffer[128];
+      const int len = llama_token_to_piece(llama_model_get_vocab(model), next_tokens[i], buffer, sizeof(buffer), 0, false);
+
+      if (len >= 0)
+      {
+        result.outputs[i] += std::string(buffer, len);
+      }
+
+      result.stats[i].output_tokens++;
+      token_counts[i]++;
+
+      // Check for EOS
+      if (next_tokens[i] == llama_vocab_eos(llama_model_get_vocab(model)))
+      {
+        completed[i] = true;
+      }
     }
 
-    llama_sampler_accept(sampler.get(), token);
-
-    if (token == llama_vocab_eos(vocab))
+    // Now build batch with the sampled tokens
+    for (size_t i = 0; i < prompts.size(); i++)
     {
-      break;
+      if (completed[i] || !token_generated[i])
+        continue;
+
+      const int pos = n_tokens[i] + token_counts[i] - 1;
+      const int idx = next_batch.n_tokens;
+
+      // Safety check to avoid buffer overrun
+      if (idx >= active_sequences)
+      {
+        std::cerr << "Warning: Batch index out of bounds" << std::endl;
+        continue;
+      }
+
+      next_batch.token[idx] = next_tokens[i];
+      next_batch.pos[idx] = pos;
+      next_batch.n_seq_id[idx] = 1;
+      next_batch.seq_id[idx][0] = i;
+      next_batch.logits[idx] = 1; // Always compute logits for generated tokens
+
+      next_batch.n_tokens++;
+
+      // Accept the token
+      llama_sampler_accept(samplers[i].get(), next_tokens[i]);
+    }
+
+    // Process batch
+    if (next_batch.n_tokens > 0)
+    {
+      if (llama_decode(ctx, next_batch) != 0)
+      {
+        std::cerr << "Failed to decode generation batch" << std::endl;
+        llama_batch_free(next_batch);
+        break;
+      }
+    }
+
+    llama_batch_free(next_batch);
+  }
+
+  // Finalize stats
+  for (size_t i = 0; i < prompts.size(); i++)
+  {
+    if (n_tokens[i] > 0)
+    {
+      result.stats[i].t_last_token = std::chrono::high_resolution_clock::now();
+      result.stats[i].finalize();
     }
   }
 
-  stats.t_last_token = std::chrono::high_resolution_clock::now();
-  stats.finalize();
-
-  return output;
+  return result;
 }
