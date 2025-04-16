@@ -90,6 +90,7 @@ std::unique_ptr<llama_context, decltype(&llama_free)> create_context(llama_model
   }
 
   llama_context_params ctx_params = llama_context_default_params();
+  ctx_params.n_ctx = 2048;
   return std::unique_ptr<llama_context, decltype(&llama_free)>(
       llama_init_from_model(model, ctx_params),
       llama_free);
@@ -116,6 +117,7 @@ int process_prompt(
     std::vector<llama_token> &tokens,
     int &n_tokens)
 {
+  llama_kv_self_clear(ctx);
 
   const llama_vocab *vocab = llama_model_get_vocab(model);
 

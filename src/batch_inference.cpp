@@ -45,7 +45,6 @@ PromptStats process_prompt(
   output_file << "Input: " << prompt << "\n";
   output_file << "Output: " << output << "\n\n";
 
-  llama_kv_self_clear(ctx.get()); // Reset context for next prompt
   return stats;
 }
 
