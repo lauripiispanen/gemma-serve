@@ -63,7 +63,7 @@ void BatchStats::print_summary() const
 
   if (total_generation_time.count() > 0)
   {
-    const double overall_tps = static_cast<double>(total_output_tokens) / (total_generation_time.count() / 1000.0);
+    const double overall_tps = static_cast<double>(total_output_tokens) / (batch_time / 1000.0);
     std::cout << "Overall tokens/sec    : " << overall_tps << "\n";
   }
 
