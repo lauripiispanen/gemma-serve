@@ -174,6 +174,7 @@ BatchProcessingResult process_batch(
 
   // Create batch for all prompts
   llama_batch batch = llama_batch_init(total_tokens, 0, prompts.size());
+  std::vector<int> logit_indices(prompts.size(), -1);
 
   // Fill the batch with tokens from all prompts
   int token_idx = 0;
@@ -191,13 +192,13 @@ BatchProcessingResult process_batch(
 
       // Only compute logits for the last token of each prompt
       batch.logits[token_idx] = (j == n_tokens[i] - 1) ? 1 : 0;
+      logit_indices[i] = token_idx;
 
       token_idx++;
     }
   }
 
   batch.n_tokens = token_idx;
-
   // Process the batch
   if (llama_decode(ctx, batch) != 0)
   {
@@ -287,7 +288,7 @@ BatchProcessingResult process_batch(
 
       try
       {
-        const llama_token token = llama_sampler_sample(samplers[i].get(), ctx, -1);
+        const llama_token token = llama_sampler_sample(samplers[i].get(), ctx, logit_indices[i]);
         next_tokens[i] = token;
         token_generated[i] = true;
       }
@@ -344,6 +345,7 @@ BatchProcessingResult process_batch(
       next_batch.n_seq_id[idx] = 1;
       next_batch.seq_id[idx][0] = i;
       next_batch.logits[idx] = 1; // Always compute logits for generated tokens
+      logit_indices[i] = idx;
 
       next_batch.n_tokens++;
 
