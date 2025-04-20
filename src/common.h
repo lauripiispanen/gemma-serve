@@ -6,6 +6,7 @@
 #include <memory>
 #include <chrono>
 #include "llama.h"
+#include "prompt_source.h"
 
 constexpr int MAX_TOKENS_OUT_DEFAULT = 128;
 constexpr int TOKEN_BUFFER_PADDING = 32;
@@ -175,26 +176,10 @@ std::unique_ptr<llama_context, decltype(&llama_free)> create_context(llama_model
 
 std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)> create_sampler();
 
-/**
- * Result structure for batch processing
- */
-struct BatchProcessingResult
-{
-  std::vector<std::string> outputs;
-  std::vector<PromptStats> stats;
-};
-
-/**
- * Process multiple prompts in a single batch
- *
- * @param ctx LLAMA context
- * @param model LLAMA model
- * @param prompts Vector of input texts to process
- * @param max_tokens_out Maximum number of tokens to generate per prompt
- * @return BatchProcessingResult containing outputs and stats for each prompt
- */
-BatchProcessingResult process_batch(
+BatchStats process_continuous_batch(
     llama_context *ctx,
-    const llama_model *model,
-    const std::vector<std::string> &prompts,
+    llama_model *model,
+    PromptSource &source,
+    std::ostream &output_stream,
+    int batch_size,
     int max_tokens_out);

@@ -1,0 +1,10 @@
+What is the capital of France?
+Explain how photosynthesis works in simple terms.
+Write a haiku about artificial intelligence.
+List the first 5 prime numbers.
+Describe the structure of a typical C++ program.
+What are the benefits of exercise?
+How does a transformer neural network work?
+Give me a recipe for chocolate chip cookies.
+Explain the concept of recursion in programming.
+What is the difference between a linked list and an array? 
